@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include "AccelStepper.h"
 #include <SoftwareSerial.h>
 #include <Wire.h>
 #include "MPU6050_6Axis_MotionApps20.h"
@@ -13,27 +12,35 @@ void processBluetoothData(String data);
 bool check_mpu();
 
 // Create an instance of SoftwareSerial class
-SoftwareSerial bluetoothModule(15, 14); // RX, TX
+// SoftwareSerial bluetoothModule(15, 14); // RX, TX
 // RX pin from bluetooth module connects to TX pin (14 ---> A0) from Arduino Uno
 // TX pin from bluetooth module connects to RX pin (15 ---> A1) from Ardino Uno
 
+// Stepper 1 ---> Left motor
+// Stepper 2 ---> Right motor
+
 // Nema 17 stepper 1 pins
-#define STEP_PIN1 4
-#define DIR_PIN1 5
+#define STEP_PIN1 4 // PORTD, bit 4
+#define DIR_PIN1 5 // PORTD, bit 5
 #define MS1_PIN1 8
 #define MS2_PIN1 9
 #define MS3_PIN1 10
 
 // Nema 17 stepper 2 pins
-#define STEP_PIN2 6
-#define DIR_PIN2 7
+#define STEP_PIN2 6 // PORTD, bit 6
+#define DIR_PIN2 7 // PORTD, bit 7
 #define MS1_PIN2 11
 #define MS2_PIN2 12
 #define MS3_PIN2 13
 
-// Create the instances of the AccelStepper class
-AccelStepper stepper1 = AccelStepper(AccelStepper::DRIVER, STEP_PIN1, DIR_PIN1);
-AccelStepper stepper2 = AccelStepper(AccelStepper::DRIVER, STEP_PIN2, DIR_PIN2);
+#define ZERO_SPEED 65535
+#define MAX_ACCEL 7
+
+#define RAD2GRAD 57.2957795
+#define GRAD2RAD 0.01745329251994329576923690768489
+
+#define CLR(x,y) (x&=(~(1<<y)))
+#define SET(x,y) (x|=(1<<y))
 
 // 1/16 microstepping variables
 // #define STEPS_PER_REVOLUTION 3200
@@ -100,14 +107,14 @@ void DMPDataReady() {
 }
 
 // PID constants
-double kP = 100; // 2000 it's too much, 1200 good approximation, 800 better approximation
-double kI = 0;
-double kD = 0; // 20 too much jittery, 3 good approximation
+double kP = 17; // 24 good
+double kI = 100;
+double kD = 0.4; // 0.8 a lot
 
 // PID variables
 double setpoint = 0;
 double input;
-double output;
+double output = 0;
 
 PID pid(&input, &output, &setpoint, kP, kI, kD, DIRECT); // PID setup
 
@@ -117,13 +124,153 @@ const long interval = 5;
 // If this interval is too low (for example, interval = 1), this will case an interfereance in the measurements of the MPU6050
 // And thus, will generate an undesired offset of the measurements. For example, 0° may be transformed in -6.3°, which doesn't makes sense
 
-unsigned long previousMillisBluetooth = millis();
-unsigned long currentMillisBluetooth;
-const long intervalBluetooth = 2000;
+// unsigned long previousMillisBluetooth = millis();
+// unsigned long currentMillisBluetooth;
+// const long intervalBluetooth = 160;
 
 float lastMPUMeasurement;
 bool lastMPUMeasurementInitialized = false;
 // bool happendLastTime = false;
+
+int16_t motor1;
+int16_t motor2;
+
+int16_t speed_m[2];           // Actual speed of motors
+uint8_t dir_m[2];             // Actual direction of steppers motors
+int16_t actual_robot_speed;          // overall robot speed (measured from steppers speed)
+int16_t actual_robot_speed_Old;          // overall robot speed (measured from steppers speed)
+float estimated_speed_filtered;
+
+uint16_t counter_m[2];        // counters for periods
+uint16_t period_m[2][8];      // Eight subperiods 
+uint8_t period_m_index[2];    // index for subperiods
+
+// 200ns => 4 instructions at 16Mhz
+void delay_200ns()  
+{
+  __asm__ __volatile__ (
+		"nop" "\n\t"
+    "nop" "\n\t"
+    "nop" "\n\t"
+		"nop"); 
+}
+
+ISR(TIMER1_COMPA_vect)
+{
+  counter_m[0]++;
+  counter_m[1]++;
+  if (counter_m[0] >= period_m[0][period_m_index[0]])
+    {
+    counter_m[0] = 0;
+    if (period_m[0][0]==ZERO_SPEED)
+      return;
+    if (dir_m[0])
+      SET(PORTD,5);  // DIR Motor 1
+    else
+      CLR(PORTD,5);
+    // We need to wait at lest 200ns to generate the Step pulse...
+    period_m_index[0] = (period_m_index[0]+1)&0x07; // period_m_index from 0 to 7
+    //delay_200ns();
+    SET(PORTD,4); // STEP Motor 1
+    delayMicroseconds(1);
+    CLR(PORTD,4);
+    }
+  if (counter_m[1] >= period_m[1][period_m_index[1]])
+    {
+    counter_m[1] = 0;
+    if (period_m[1][0]==ZERO_SPEED)
+      return;
+    if (dir_m[1])
+      SET(PORTD,7);   // DIR Motor 2
+    else
+      CLR(PORTD,7);
+    period_m_index[1] = (period_m_index[1]+1)&0x07;
+    //delay_200ns();
+    SET(PORTD,6); // STEP Motor 2
+    delayMicroseconds(1);
+    CLR(PORTD,6);
+    }
+}
+
+// Dividimos en 8 subperiodos para aumentar la resolucion a velocidades altas (periodos pequeños)
+// subperiod = ((1000 % vel)*8)/vel;
+// Examples 4 subperiods:
+// 1000/260 = 3.84  subperiod = 3
+// 1000/240 = 4.16  subperiod = 0
+// 1000/220 = 4.54  subperiod = 2
+// 1000/300 = 3.33  subperiod = 1 
+void calculateSubperiods(uint8_t motor)
+{
+  int subperiod;
+  int absSpeed;
+  uint8_t j;
+  
+  if (speed_m[motor] == 0)
+    {
+    for (j=0;j<8;j++)
+      period_m[motor][j] = ZERO_SPEED;
+    return;
+    }
+  if (speed_m[motor] > 0 )   // Positive speed
+    {
+    dir_m[motor] = 1;
+    absSpeed = speed_m[motor];
+    }
+  else                       // Negative speed
+    {
+    dir_m[motor] = 0;
+    absSpeed = -speed_m[motor];
+    }
+    
+  for (j=0;j<8;j++)
+    period_m[motor][j] = 1000/absSpeed;
+  // Calculate the subperiod. if module <0.25 => subperiod=0, if module < 0.5 => subperiod=1. if module < 0.75 subperiod=2 else subperiod=3
+  subperiod = ((1000 % absSpeed)*8)/absSpeed;   // Optimized code to calculate subperiod (integer math)
+  if (subperiod>0)
+   period_m[motor][1]++;
+  if (subperiod>1)
+   period_m[motor][5]++;
+  if (subperiod>2)
+   period_m[motor][3]++;
+  if (subperiod>3)
+   period_m[motor][7]++;
+  if (subperiod>4)
+   period_m[motor][0]++;
+  if (subperiod>5)
+   period_m[motor][4]++;
+  if (subperiod>6)
+   period_m[motor][2]++;
+  
+  // DEBUG
+  /*
+  if ((motor==0)&&((debug_counter%10)==0)){
+    Serial.print(1000.0/absSpeed);Serial.print("\t");Serial.print(absSpeed);Serial.print("\t");
+    Serial.print(period_m[motor][0]);Serial.print("-");
+    Serial.print(period_m[motor][1]);Serial.print("-");
+    Serial.print(period_m[motor][2]);Serial.print("-");
+    Serial.println(period_m[motor][3]);
+    }
+  */  
+}
+
+void setMotorSpeed(uint8_t motor, int16_t tspeed)
+{
+  // WE LIMIT MAX ACCELERATION
+  if ((speed_m[motor] - tspeed)>MAX_ACCEL)
+    speed_m[motor] -= MAX_ACCEL;
+  else if ((speed_m[motor] - tspeed)<-MAX_ACCEL)
+    speed_m[motor] += MAX_ACCEL;
+  else
+    speed_m[motor] = tspeed;
+  
+  calculateSubperiods(motor);  // We use four subperiods to increase resolution
+  
+  // To save energy when its not running...
+  // if ((speed_m[0]==0)&&(speed_m[1]==0))
+  //   digitalWrite(4,HIGH);   // Disable motors
+  // else
+  //   digitalWrite(4,LOW);   // Enable motors
+}
 
 void setup() {
   Serial.begin(115200);
@@ -139,6 +286,13 @@ void setup() {
   digitalWrite(DIR_PIN1, LOW);
   digitalWrite(STEP_PIN2, LOW);
   digitalWrite(DIR_PIN2, LOW);
+
+  // pinMode(ENA_PIN1, OUTPUT);
+  // pinMode(ENA_PIN2, OUTPUT);
+
+  // // Disable motors
+  // digitalWrite(ENA_PIN1, HIGH);
+  // digitalWrite(ENA_PIN2, HIGH);
 
   // Set microstepping pins as output
   pinMode(MS1_PIN1, OUTPUT);
@@ -177,19 +331,7 @@ void setup() {
       Fastwire::setup(400, true);
   #endif
 
-  bluetoothModule.begin(9600);
-
-  // Set the current position as 0° for the steppers
-  // stepper1.setCurrentPosition(0);
-  // stepper2.setCurrentPosition(0);
-
-  // Set the maximum speed of the steppers
-  stepper1.setMaxSpeed(4000.0);
-  stepper2.setMaxSpeed(4000.0);
-
-  // Set the acceleration of the steppers
-  stepper1.setAcceleration(500);
-  stepper2.setAcceleration(500);
+  // bluetoothModule.begin(9600);
 
   /*Initialize device*/
   Serial.println(F("Initializing I2C devices..."));
@@ -207,7 +349,7 @@ void setup() {
 
   /* Initializate and configure the DMP*/
   Serial.println(F("Initializing DMP..."));
-  mpu.setRate(5); // https://github.com/ElectronicCats/mpu6050/issues/16
+  // mpu.setRate(5); // https://github.com/ElectronicCats/mpu6050/issues/16
   devStatus = mpu.dmpInitialize();
 
   // Calibration values obtained (offsets)
@@ -247,19 +389,41 @@ void setup() {
     // 2 = DMP configuration updates failed
   }
 
-  pid.SetMode(AUTOMATIC);
-  pid.SetOutputLimits(-4000,4000);
+  //We are going to overwrite the Timer1 to use the stepper motors
+  
+  // STEPPER MOTORS INITIALIZATION
+  // TIMER1 CTC MODE
+  TCCR1B &= ~(1<<WGM13);
+  TCCR1B |=  (1<<WGM12);
+  TCCR1A &= ~(1<<WGM11); 
+  TCCR1A &= ~(1<<WGM10);
 
-  // while (millis() - previousMillis < 150){
-  //   if (mpuInterrupt == true) {
-  //     read_angles();
-  //     // Serial.println(pitch());
-  //   }
-  // }
-    
+  // output mode = 00 (disconnected)
+  TCCR1A &= ~(3<<COM1A0); 
+  TCCR1A &= ~(3<<COM1B0); 
+  
+  // Set the timer pre-scaler
+  // Generally we use a divider of 8, resulting in a 2MHz timer on 16MHz CPU
+  TCCR1B = (TCCR1B & ~(0x07<<CS10)) | (2<<CS10);
+
+  //OCR1A = 125;  // 16Khz
+  //OCR1A = 100;  // 20Khz
+  OCR1A = 80;   // 25Khz
+  TCNT1 = 0;
+
+  delay(1000);
+
+  TIMSK1 |= (1<<OCIE1A);  // Enable Timer1 interrupt
+  // digitalWrite(4,LOW);    // Enable stepper drivers
+  
+  pid.SetMode(AUTOMATIC);
+  pid.SetOutputLimits(-500,500);
+
   Serial.flush();
 }
 
+// char bluetoothBuffer[100];
+// unsigned int bufferIndex = 0;
 
 
 void loop() {
@@ -267,56 +431,54 @@ void loop() {
   if (!DMPReady)
   {
     Serial.println("DMP not ready!");
-    stepper1.stop();
-    stepper2.stop();
     return;
   }
 
-  stepper1.runSpeed();
-  stepper2.runSpeed();
+  // currentMillis = millis();
 
-  currentMillis = millis();
+  // if (currentMillis - previousMillisBluetooth > intervalBluetooth) {
+  //   previousMillisBluetooth = currentMillis;
+  //   if (bluetoothModule.available()) {
+  //     String receivedData = bluetoothModule.readStringUntil('\n'); // Read a line of data
+  //     processBluetoothData(receivedData); // Process the received data
+  //   }
+  // }
 
-  if (currentMillis - previousMillisBluetooth > intervalBluetooth) {
-    previousMillisBluetooth = currentMillis;
-    if (bluetoothModule.available()) {
-      String receivedData = bluetoothModule.readStringUntil('\n'); // Read a line of data
-      processBluetoothData(receivedData); // Process the received data
-  }
-  }
+  // if (currentMillis - previousMillisBluetooth > intervalBluetooth) {
+  //   if (bluetoothModule.available()) {
+  //       char receivedChar = bluetoothModule.read();
+  //       if (receivedChar == '\n') {
+  //           bluetoothBuffer[bufferIndex] = '\0'; // Finaliza la cadena
+  //           processBluetoothData(String(bluetoothBuffer));
+  //           bufferIndex = 0; // Resetea el índice
+  //       } else if (bufferIndex < sizeof(bluetoothBuffer) - 1) {
+  //           bluetoothBuffer[bufferIndex++] = receivedChar;
+  //       }
+  //   }
+  //  }
 
-  if (currentMillis - previousMillis > interval) {
-    previousMillis = currentMillis;
-
-    if (mpu.dmpGetCurrentFIFOPacket(FIFOBuffer)) { // Get the Latest packet 
-        mpu.dmpGetQuaternion(&q, FIFOBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        // Serial.println(ypr[1] * 180/M_PI);
-        // Serial.println(output);
-        if (lastMPUMeasurementInitialized == false) {
-          lastMPUMeasurement = pitch();
+  if (mpu.dmpGetCurrentFIFOPacket(FIFOBuffer)) { // Get the Latest packet 
+      mpu.dmpGetQuaternion(&q, FIFOBuffer);
+      mpu.dmpGetGravity(&gravity, &q);
+      mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+      // Serial.println(ypr[1] * 180/M_PI);
+      // Serial.println(output);
+      if (lastMPUMeasurementInitialized == false) {
+        lastMPUMeasurement = pitch();
+        input = pitch();
+        pid.Compute();
+        lastMPUMeasurementInitialized = true;
+      } else {
+        if (pitch() < 10 + lastMPUMeasurement && pitch() > lastMPUMeasurement - 10){
           input = pitch();
           pid.Compute();
-          lastMPUMeasurementInitialized = true;
-        } else {
-          if (pitch() < 3 + lastMPUMeasurement && pitch() > lastMPUMeasurement - 3){
-            input = pitch();
-            pid.Compute();
-          }
         }
-        // Serial.println(input);
-    }
-
-    stepper1.setSpeed(output);
-    stepper2.setSpeed(output);
-
+      }
+  }
     // Serial.println(output);
 
-  }
-
-  stepper1.runSpeed();
-  stepper2.runSpeed();
+  setMotorSpeed(0, output);
+  setMotorSpeed(1, output);
 }
 
 
@@ -383,10 +545,10 @@ void processBluetoothData(String data) {
   }
 
   // Print updated PID values for debugging
-  // Serial.print("Updated PID values -> kP: ");
-  // Serial.print(kP);
-  // Serial.print(", kI: ");
-  // Serial.print(kI);
-  // Serial.print(", kD: ");
-  // Serial.println(kD);
+  Serial.print("Updated PID values -> kP: ");
+  Serial.print(kP);
+  Serial.print(", kI: ");
+  Serial.print(kI);
+  Serial.print(", kD: ");
+  Serial.println(kD);
 }
