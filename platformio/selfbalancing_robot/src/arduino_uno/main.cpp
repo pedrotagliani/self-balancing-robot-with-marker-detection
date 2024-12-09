@@ -25,6 +25,7 @@ bool check_mpu();
 #define MS1_PIN1 8
 #define MS2_PIN1 9
 #define MS3_PIN1 10
+#define ENA_PIN1 17
 
 // Nema 17 stepper 2 pins
 #define STEP_PIN2 6 // PORTD, bit 6
@@ -32,6 +33,7 @@ bool check_mpu();
 #define MS1_PIN2 11
 #define MS2_PIN2 12
 #define MS3_PIN2 13
+#define ENA_PIN2 3
 
 #define ZERO_SPEED 65535
 #define MAX_ACCEL 7
@@ -107,9 +109,9 @@ void DMPDataReady() {
 }
 
 // PID constants
-double kP = 17; // 24 good
+double kP = 14; // 24 good
 double kI = 100;
-double kD = 0.4; // 0.8 a lot
+double kD = 0.3; // 0.8 a lot
 
 // PID variables
 double setpoint = 0;
@@ -266,10 +268,14 @@ void setMotorSpeed(uint8_t motor, int16_t tspeed)
   calculateSubperiods(motor);  // We use four subperiods to increase resolution
   
   // To save energy when its not running...
-  // if ((speed_m[0]==0)&&(speed_m[1]==0))
-  //   digitalWrite(4,HIGH);   // Disable motors
-  // else
-  //   digitalWrite(4,LOW);   // Enable motors
+  if ((speed_m[0]==0)&&(speed_m[1]==0)) {
+    digitalWrite(3,HIGH);   // Disable motors
+    digitalWrite(17,HIGH);   // Disable motors
+  }
+  else {
+    digitalWrite(3,LOW);   // Enable motors
+    digitalWrite(17,LOW);   // Enable motors
+  }
 }
 
 void setup() {
@@ -287,12 +293,12 @@ void setup() {
   digitalWrite(STEP_PIN2, LOW);
   digitalWrite(DIR_PIN2, LOW);
 
-  // pinMode(ENA_PIN1, OUTPUT);
-  // pinMode(ENA_PIN2, OUTPUT);
+  pinMode(ENA_PIN1, OUTPUT);
+  pinMode(ENA_PIN2, OUTPUT);
 
-  // // Disable motors
-  // digitalWrite(ENA_PIN1, HIGH);
-  // digitalWrite(ENA_PIN2, HIGH);
+  // Disable motors
+  digitalWrite(ENA_PIN1, HIGH);
+  digitalWrite(ENA_PIN2, HIGH);
 
   // Set microstepping pins as output
   pinMode(MS1_PIN1, OUTPUT);
@@ -414,7 +420,10 @@ void setup() {
   delay(1000);
 
   TIMSK1 |= (1<<OCIE1A);  // Enable Timer1 interrupt
-  // digitalWrite(4,LOW);    // Enable stepper drivers
+  // Enable stepper drivers
+  digitalWrite(ENA_PIN1, LOW);
+  digitalWrite(ENA_PIN2, LOW);
+
   
   pid.SetMode(AUTOMATIC);
   pid.SetOutputLimits(-500,500);
@@ -463,6 +472,7 @@ void loop() {
       mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
       // Serial.println(ypr[1] * 180/M_PI);
       // Serial.println(output);
+      Serial.println(input);
       if (lastMPUMeasurementInitialized == false) {
         lastMPUMeasurement = pitch();
         input = pitch();
@@ -471,6 +481,7 @@ void loop() {
       } else {
         if (pitch() < 10 + lastMPUMeasurement && pitch() > lastMPUMeasurement - 10){
           input = pitch();
+          lastMPUMeasurement = pitch();
           pid.Compute();
         }
       }
