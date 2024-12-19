@@ -20,3 +20,9 @@ Finalmente, este script se conecta con el robot mediante Bluetooth, permitiendo 
 </p>
 
 <img src="https://github.com/pedrotagliani/self-balancing-robot-with-marker-detection/blob/main/Images/Self-balancing%20robot.png" alt="Robot balanceador"/>
+
+---
+
+## Integrantes
+- Daiana Belén Viscarra Hernández.
+- Pedro Tagliani.
