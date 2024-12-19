@@ -1,3 +1,6 @@
+<img src="https://github.com/pedrotagliani/self-balancing-robot-with-marker-detection/blob/main/Images/FI%20UNLZ%20Logo.jpg" alt="FI UNLZ"/>
+
+
 <h1 align="center">Robot balanceador con detección de marcadores ArUco</h1>
 
 <p>
