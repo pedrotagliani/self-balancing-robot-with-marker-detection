@@ -225,4 +225,6 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+scripts/calibration_images/*.png
+
 # End of https://www.toptal.com/developers/gitignore/api/python,platformio,windows,visualstudiocode
