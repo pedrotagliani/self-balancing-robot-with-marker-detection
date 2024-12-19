@@ -15,3 +15,5 @@ El script en Python procesa estas imágenes en tiempo real, tras realizar la cal
 
 Finalmente, este script se conecta con el robot mediante Bluetooth, permitiendo que el robot recibiera alertas cada vez que se detectaba un marcador en las imágenes. Con esta información, el robot avanzaba de manera autónoma hacia el marcador identificado, logrando un desplazamiento eficiente y preciso hacia el objetivo.
 </p>
+
+<img src="https://github.com/pedrotagliani/self-balancing-robot-with-marker-detection/blob/main/Images/Self-balancing%20robot.png" alt="Robot balanceador"/>
